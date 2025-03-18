@@ -182,6 +182,7 @@ static char *afl_environment_variables[] = {
     "AFL_EXP_SIGNAL",
     "AFL_NO_CONNECTION_REUSE",
     "AFL_NO_MULTI_CONNECTION",
+    "AFL_FORCED_KILL",
 #if defined USE_COLOR && !defined ALWAYS_COLORED
     "AFL_NO_COLOR",
     "AFL_NO_COLOUR",
