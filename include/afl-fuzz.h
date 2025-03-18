@@ -166,8 +166,11 @@ struct queue_entry {
       favored,                          /* Currently favored?               */
       fs_redundant,                     /* Marked as redundant in the fs?   */
       is_ascii,                         /* Is the input just ascii text?    */
-      disabled;                         /* Is disabled from fuzz selection  */
-
+      disabled,                         /* Is disabled from fuzz selection  */
+                     /* xzw add */
+      focusing,          /* Being focused?                   */
+      focused,       /* Focused?                         */
+      is_pre_packet; /* Is pre-packet?                   */
   u32 bitmap_size,                      /* Number of bits set in bitmap     */
 #ifdef INTROSPECTION
       stats_selected,                   /* stats: how often selected        */
@@ -402,7 +405,13 @@ typedef struct afl_env_vars {
       afl_keep_timeouts, afl_no_crash_readme, afl_ignore_timeouts,
       afl_no_startup_calibration, afl_no_warn_instability,
       afl_post_process_keep_original, afl_crashing_seeds_as_new_crash,
-      afl_final_sync, afl_ignore_seed_problems;
+      afl_final_sync, afl_ignore_seed_problems,
+      /* xzw add */
+      ewma_mode,      /* xzw add for ewma mode */
+      afl_exp_signal, /* xzw add for experiments 1->SIGUSR1 2->SIGRTMIN */
+      afl_forced_kill,
+      afl_no_connection_reuse,
+      afl_no_multi_connection;
 
   u8 *afl_tmpdir, *afl_custom_mutator_library, *afl_python_module, *afl_path,
       *afl_hang_tmout, *afl_forksrv_init_tmout, *afl_preload,
@@ -412,7 +421,7 @@ typedef struct afl_env_vars {
       *afl_target_env, *afl_persistent_record, *afl_exit_on_time;
 
   s32 afl_pizza_mode;
-
+  u64 afl_exp_t_interval;
 } afl_env_vars_t;
 
 struct afl_pass_stat {
@@ -428,6 +437,11 @@ struct foreign_sync {
   time_t mtime;
 
 };
+
+typedef enum protocol_type{
+  /* 00 */ PRO_TCP,
+  /* 01 */ PRO_UDP
+} protocol_type_t;
 
 typedef struct afl_state {
 
@@ -540,7 +554,12 @@ typedef struct afl_state {
       expand_havoc,                /* perform expensive havoc after no find */
       cycle_schedules,                  /* cycle power schedules?           */
       old_seed_selection,               /* use vanilla afl seed selection   */
-      reinit_table;                     /* reinit the queue weight table    */
+      reinit_table,                     /* reinit the queue weight table    */
+
+   /* FOCUS_MODE的增加是为了在复用连接的情况下达到更好的表现，     *
+   * FOCUS_MODE会随机的挑选几个种子以随机的次序附加在当前种子之前 */
+
+        focus_mode;        /* xzw add for focus mode           */
 
   u8 *virgin_bits,                      /* Regions yet untouched by fuzzing */
       *virgin_tmout,                    /* Bits we haven't seen in tmouts   */
@@ -558,7 +577,10 @@ typedef struct afl_state {
   volatile u8 stop_soon,                /* Ctrl-C pressed?                  */
       clear_screen;                     /* Window resized?                  */
 
-  u32 queued_items,                     /* Total number of queued testcases */
+   u32 queued_items, /* Total number of queued testcases */
+
+      queued_pre,         /* Total number of pre-packet       */
+      queued_focused,     /* Total number of focused entry    */
       queued_variable,                  /* Testcases with variable behavior */
       queued_at_start,                  /* Total number of initial inputs   */
       queued_discovered,                /* Items discovered during this run */
@@ -647,6 +669,19 @@ typedef struct afl_state {
   struct queue_entry *queue,            /* Fuzzing queue (linked list)      */
       *queue_cur,                       /* Current offset within the queue  */
       *queue_top;                       /* Top of the list                  */
+
+    // xzw:这里是普通种子的queue,现在我们创建前缀包专属的pre_queue
+
+  struct queue_entry *pre_queue, /* Pre-packet queue (linked list)   */
+      *pre_queue_cur,            /* Current offset within the queue  */
+      *pre_queue_top;            /* Top of the list                  */
+  struct queue_entry **pre_queue_buf;
+  // xzw add end
+
+  // nethook
+  u8 use_net;                          /* Whether enable nethook*/
+  u8 net_protocol;                     /* The network transmission protocol used PRO_TCP or PRO_UDP */
+  u32 net_port;                        /* The port number */
 
   // growing buf
   struct queue_entry **queue_buf;
@@ -1177,7 +1212,8 @@ u8   common_fuzz_stuff(afl_state_t *, u8 *, u32);
 fsrv_run_result_t fuzz_run_target(afl_state_t *, afl_forkserver_t *fsrv, u32);
 
 /* Fuzz one */
-
+u8   send_pre_packet(afl_state_t *afl);
+u8   focuse_stage(afl_state_t *afl, u8 *in_buf, u32 len);
 u8   fuzz_one_original(afl_state_t *);
 u8   pilot_fuzzing(afl_state_t *);
 u8   core_fuzzing(afl_state_t *);

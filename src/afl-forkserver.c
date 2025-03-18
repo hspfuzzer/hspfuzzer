@@ -49,6 +49,19 @@
 #include <sys/select.h>
 #include <sys/stat.h>
 
+#define DEBUG 0
+#if DEBUG
+  #define LOG(format, ...)                                                    \
+    do {                                                                      \
+      struct timespec ts;                                                     \
+      clock_gettime(CLOCK_REALTIME, &ts);                                     \
+      printf("[fuzz][%ld.%06ld][%d][%d][%s] " format, ts.tv_sec,              \
+             ts.tv_nsec / 1000, getpid(), gettid(), __func__, ##__VA_ARGS__); \
+    } while (0)
+#else
+  #define LOG(format, ...)
+#endif  // DEBUG
+
 #ifdef __linux__
   #include <dlfcn.h>
 
@@ -239,6 +252,12 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->out_file = NULL;
   fsrv->child_kill_signal = SIGKILL;
 
+  /* Nethook*/
+  fsrv->new_start_tmout = 5000;
+  fsrv->new_conn_tmout = 10;
+  fsrv->timeout_times_threh = 5;
+  fsrv->badconn_times_threh = 6;
+
   /* exec related stuff */
   fsrv->child_pid = -1;
   fsrv->map_size = get_map_size();
@@ -250,6 +269,9 @@ void afl_fsrv_init(afl_forkserver_t *fsrv) {
   fsrv->uses_asan = false;
 
   fsrv->init_child_func = fsrv_exec_child;
+
+  //fsrv->need_new_conn = 1; /* xzw : At first need new conn */
+
   list_append(&fsrv_list, fsrv);
 
 }
@@ -284,6 +306,11 @@ void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from) {
   fsrv_to->init_child_func = from->init_child_func;
   // Note: do not copy ->add_extra_func or ->persistent_record*
 
+  fsrv_to->need_new_conn = from->need_new_conn; /* xzw:not sure this is a good idea */
+  fsrv_to->forced_kill = from->forced_kill;
+  fsrv_to->no_connection_reuse = from->no_connection_reuse;
+  fsrv_to->no_multi_connection = from->no_multi_connection;
+  fsrv_to->ewma_enabled = from->ewma_enabled;
   list_append(&fsrv_list, fsrv_to);
 
 }
@@ -524,6 +551,7 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
                     volatile u8 *stop_soon_p, u8 debug_child_output) {
 
   int   st_pipe[2], ctl_pipe[2];
+  int   send_pipe[2], recv_pipe[2];
   s32   status;
   s32   rlen;
   char *ignore_autodict = getenv("AFL_NO_AUTODICT");
@@ -833,6 +861,7 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
   }
 
   if (pipe(st_pipe) || pipe(ctl_pipe)) { PFATAL("pipe() failed"); }
+  if (pipe(recv_pipe) || pipe(send_pipe)) { PFATAL("pipe() failed"); } //nethook add
 
   fsrv->last_run_timed_out = 0;
   fsrv->fsrv_pid = fork();
@@ -920,10 +949,20 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
     if (dup2(ctl_pipe[0], FORKSRV_FD) < 0) { PFATAL("dup2() failed"); }
     if (dup2(st_pipe[1], FORKSRV_FD + 1) < 0) { PFATAL("dup2() failed"); }
 
+    // nethook add
+    if (dup2(send_pipe[0], FORKSRV_FD + 3) < 0) { PFATAL("dup2() failed"); }
+    if (dup2(recv_pipe[1], FORKSRV_FD + 4) < 0) { PFATAL("dup2() failed"); }
+
     close(ctl_pipe[0]);
     close(ctl_pipe[1]);
     close(st_pipe[0]);
     close(st_pipe[1]);
+
+    // nethook add
+    close(send_pipe[0]);
+    close(send_pipe[1]);
+    close(recv_pipe[0]);
+    close(recv_pipe[1]);
 
     close(fsrv->out_dir_fd);
     close(fsrv->dev_null_fd);
@@ -968,8 +1007,16 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
   close(ctl_pipe[0]);
   close(st_pipe[1]);
 
+  // nethook
+  close(send_pipe[0]);
+  close(recv_pipe[1]);
+
   fsrv->fsrv_ctl_fd = ctl_pipe[1];
   fsrv->fsrv_st_fd = st_pipe[0];
+
+  // nethook
+  fsrv->hook_ctl_fd = send_pipe[1];
+  fsrv->hook_st_fd = recv_pipe[0];
 
   /* Wait for the fork server to come up, but don't wait too long. */
 
@@ -1019,6 +1066,10 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
     if (!be_quiet) { OKF("All right - fork server is up."); }
 
+     // xzw destructive enable
+    fsrv->use_shmem_fuzz = 1;
+    ACTF("Using SHARED MEMORY FUZZING feature(forced).");
+
     if (getenv("AFL_DEBUG")) {
 
       ACTF("Extended forkserver functions received (%08x).", status);
@@ -1055,14 +1106,18 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
 
       }
 
-      if ((status & FS_OPT_SHDMEM_FUZZ) == FS_OPT_SHDMEM_FUZZ) {
+     
 
-        if (fsrv->support_shmem_fuzz) {
+       //xzw add support to shm
+      if (fsrv->use_net || (status & FS_OPT_SHDMEM_FUZZ) == FS_OPT_SHDMEM_FUZZ) {
+
+        if (fsrv->support_shmem_fuzz || fsrv->use_net ) {
 
           fsrv->use_shmem_fuzz = 1;
-          if (!be_quiet) { ACTF("Using SHARED MEMORY FUZZING feature."); }
+          if (!be_quiet) { ACTF("Using SHARED MEMORY FUZZING feature(normal)."); }
 
-          if ((status & FS_OPT_AUTODICT) == 0 || ignore_autodict) {
+          // Since nethook is force to use shared memory to fuzz, so do not go into the if. zyp
+          if (!fsrv->use_net && ((status & FS_OPT_AUTODICT) == 0 || ignore_autodict)) {
 
             u32 send_status = (FS_OPT_ENABLED | FS_OPT_SHDMEM_FUZZ);
             if (write(fsrv->fsrv_ctl_fd, &send_status, 4) != 4) {
@@ -1080,7 +1135,8 @@ void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
               "it.");
 
         }
-
+        ACTF("fsrv->use_shmem_fuzz:%d\n", fsrv->use_shmem_fuzz);
+        ACTF("fsrv->support_shmem_fuzz:%d\n", fsrv->support_shmem_fuzz);
       }
 
       if ((status & FS_OPT_MAPSIZE) == FS_OPT_MAPSIZE) {
@@ -1507,6 +1563,7 @@ afl_fsrv_write_to_testcase(afl_forkserver_t *fsrv, u8 *buf, size_t len) {
 
     if (unlikely(len > MAX_FILE)) len = MAX_FILE;
 
+
     *fsrv->shmem_fuzz_len = len;
     memcpy(fsrv->shmem_fuzz, buf, len);
 #ifdef _DEBUG
@@ -1580,8 +1637,72 @@ afl_fsrv_write_to_testcase(afl_forkserver_t *fsrv, u8 *buf, size_t len) {
 
 }
 
+// 0 not existing, 1 existing
+u8 exist_pid(int pid) {
+  if (pid == -1 || pid == 0) { return 0; }
+  int killres = kill(pid, 0);
+  int errnon = errno;
+  if (killres == 0) {
+    return 1;  // the process is existing and is child
+  } else if (killres == -1) {
+    if (errnon == ESRCH) {
+      return 0;  // the process is not existing
+    } else if (errnon == EPERM) {
+      return 0;  // the process is existing but is not child
+    } else {
+      return 0;  // should not happen
+    }
+  }
+  return 0;
+}
+
+// xzw add for ewma
+double ewma(double prev_avg, double value, double alpha) {
+  return alpha * value + (1 - alpha) * prev_avg;
+}
+
+u32 count_connections(afl_forkserver_t *fsrv, int protocol) {
+  char  path[256];
+  FILE *fp;
+  u32   count = 0;
+  char  buffer[1024];
+
+  // 根据协议类型选择正确的文件路径
+  if (protocol == 1) {
+    snprintf(path, sizeof(path), "/proc/%d/net/udp", fsrv->child_pid);
+  } else if (protocol == 0) {
+    snprintf(path, sizeof(path), "/proc/%d/net/tcp", fsrv->child_pid);
+  } else {
+    fprintf(stderr, "Invalid protocol type. Use 1 for UDP, 0 for TCP.\n");
+    return 0;
+  }
+  // 尝试打开文件
+  fp = fopen(path, "r");
+  if (fp == NULL) {
+    // perror("Unable to open file");
+    return 0;
+  }
+
+  if (fgets(buffer, sizeof(buffer), fp) == NULL) {
+    fclose(fp);
+    return -1;
+  }
+
+  while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+    if (strlen(buffer) > 0) { count++; }
+  }
+
+  fclose(fp);
+
+  return count;  // 返回计数，不减1因为跳过了第一行标题
+}
+
 /* Execute target application, monitoring for timeouts. Return status
    information. The called program will update afl->fsrv->trace_bits. */
+
+u64 last_time = 0;
+u8 *previous_trace_bits=NULL;
+u32 ewma_avg = 0;
 
 fsrv_run_result_t __attribute__((hot))
 afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
@@ -1590,6 +1711,8 @@ afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
   s32 res;
   u32 exec_ms;
   u32 write_value = fsrv->last_run_timed_out;
+
+  if (!last_time) { last_time = get_cur_time(); }
 
 #ifdef __linux__
   if (fsrv->nyx_mode) {
@@ -1665,23 +1788,67 @@ afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
   MEM_BARRIER();
 #endif
 
-  /* we have the fork server (or faux server) up and running
-  First, tell it if the previous run timed out. */
 
-  if ((res = write(fsrv->fsrv_ctl_fd, &write_value, 4)) != 4) {
+  u8 need_new_prog = 0;
+  u8 is_new_start = 0;
+  u8 exp_send = 0;
 
-    if (*stop_soon_p) { return 0; }
-    RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+  
 
+    if (fsrv->exp_signal) {
+    u64 cur_time = get_cur_time();
+
+    if (cur_time - last_time >= fsrv->exp_t_interval) {
+      last_time = cur_time;
+      exp_send = 1;
+    }
+
+       if (exp_send) {
+      LOG("exp send signal\n");
+      int sig=0;
+
+      if (fsrv->exp_signal == 1) {
+        sig = SIGUSR1;
+      } else if (fsrv->exp_signal == 2) {
+        sig = SIGRTMIN;
+      } else {
+        RPFATAL(fsrv->exp_signal,"Wrong set environment variable?");
+      }
+      s32 tmp_pid1 = fsrv->child_pid;
+      if (tmp_pid1 > 0) { kill(tmp_pid1, sig); }
+
+      exp_send = 0;
+    }
   }
 
-  fsrv->last_run_timed_out = 0;
+  // First check whether we need to fork new child process
+  if (fsrv->use_net) {  
+    if (!exist_pid(fsrv->child_pid)) { 
+        need_new_prog = 1; 
+    }
+  }
 
-  if ((res = read(fsrv->fsrv_st_fd, &fsrv->child_pid, 4)) != 4) {
+  if (!fsrv->use_net || (fsrv->use_net && need_new_prog)) 
+  {  // In nethook, we only need to fork server sometimes 
 
-    if (*stop_soon_p) { return 0; }
-    RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+    /* we have the fork server (or faux server) up and running
+    First, tell it if the previous run timed out. */
 
+    if ((res = write(fsrv->fsrv_ctl_fd, &write_value, 4)) != 4) {
+      if (*stop_soon_p) { return 0; }
+      RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+    }
+
+    fsrv->last_run_timed_out = 0;
+
+    if ((res = read(fsrv->fsrv_st_fd, &fsrv->child_pid, 4)) != 4) {
+      if (*stop_soon_p) { return 0; }
+      RPFATAL(res, "Unable to request new process from fork server (OOM?)");
+    }
+
+    is_new_start = 1;
+    fsrv->keep_timeout_times = 0;
+    fsrv->keep_badconn_times = 0;
   }
 
 #ifdef AFL_PERSISTENT_RECORD
@@ -1718,136 +1885,287 @@ afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
 
   }
 
-  exec_ms = read_s32_timed(fsrv->fsrv_st_fd, &fsrv->child_status, timeout,
-                           stop_soon_p);
+  if (!fsrv->use_net) 
+  {
+    exec_ms = read_s32_timed(fsrv->fsrv_st_fd, &fsrv->child_status, timeout,
+                             stop_soon_p);
 
-  if (exec_ms > timeout) {
+    if (exec_ms > timeout) {
+      /* If there was no response from forkserver after timeout seconds,
+      we kill the child. The forkserver should inform us afterwards */
 
-    /* If there was no response from forkserver after timeout seconds,
-    we kill the child. The forkserver should inform us afterwards */
-
-    s32 tmp_pid = fsrv->child_pid;
-    if (tmp_pid > 0) {
-
-      kill(tmp_pid, fsrv->child_kill_signal);
-      fsrv->child_pid = -1;
-
-    }
-
-    fsrv->last_run_timed_out = 1;
-    if (read(fsrv->fsrv_st_fd, &fsrv->child_status, 4) < 4) { exec_ms = 0; }
-
-  }
-
-  if (!exec_ms) {
-
-    if (*stop_soon_p) { return 0; }
-    SAYF("\n" cLRD "[-] " cRST
-         "Unable to communicate with fork server. Some possible reasons:\n\n"
-         "    - You've run out of memory. Use -m to increase the the memory "
-         "limit\n"
-         "      to something higher than %llu.\n"
-         "    - The binary or one of the libraries it uses manages to "
-         "create\n"
-         "      threads before the forkserver initializes.\n"
-         "    - The binary, at least in some circumstances, exits in a way "
-         "that\n"
-         "      also kills the parent process - raise() could be the "
-         "culprit.\n"
-         "    - If using persistent mode with QEMU, "
-         "AFL_QEMU_PERSISTENT_ADDR "
-         "is\n"
-         "      probably not valid (hint: add the base address in case of "
-         "PIE)"
-         "\n\n"
-         "If all else fails you can disable the fork server via "
-         "AFL_NO_FORKSRV=1.\n",
-         fsrv->mem_limit);
-    RPFATAL(res, "Unable to communicate with fork server");
-
-  }
-
-  if (!WIFSTOPPED(fsrv->child_status)) { fsrv->child_pid = -1; }
-
-  fsrv->total_execs++;
-
-  /* Any subsequent operations on fsrv->trace_bits must not be moved by the
-     compiler below this point. Past this location, fsrv->trace_bits[]
-     behave very normally and do not have to be treated as volatile. */
-
-  MEM_BARRIER();
-
-  /* Report outcome to caller. */
-
-  /* Was the run unsuccessful? */
-  if (unlikely(*(u32 *)fsrv->trace_bits == EXEC_FAIL_SIG)) {
-
-    return FSRV_RUN_ERROR;
-
-  }
-
-  /* Did we timeout? */
-  if (unlikely(fsrv->last_run_timed_out)) {
-
-    fsrv->last_kill_signal = fsrv->child_kill_signal;
-    return FSRV_RUN_TMOUT;
-
-  }
-
-  /* Did we crash?
-  In a normal case, (abort) WIFSIGNALED(child_status) will be set.
-  MSAN in uses_asan mode uses a special exit code as it doesn't support
-  abort_on_error. On top, a user may specify a custom AFL_CRASH_EXITCODE.
-  Handle all three cases here. */
-
-  if (unlikely(
-          /* A normal crash/abort */
-          (WIFSIGNALED(fsrv->child_status)) ||
-          /* special handling for msan and lsan */
-          (fsrv->uses_asan &&
-           (WEXITSTATUS(fsrv->child_status) == MSAN_ERROR ||
-            WEXITSTATUS(fsrv->child_status) == LSAN_ERROR)) ||
-          /* the custom crash_exitcode was returned by the target */
-          (fsrv->uses_crash_exitcode &&
-           WEXITSTATUS(fsrv->child_status) == fsrv->crash_exitcode))) {
-
-#ifdef AFL_PERSISTENT_RECORD
-    if (unlikely(fsrv->persistent_record)) {
-
-      char fn[PATH_MAX];
-      u32  i, writecnt = 0;
-      for (i = 0; i < fsrv->persistent_record; ++i) {
-
-        u32 entry = (i + fsrv->persistent_record_idx) % fsrv->persistent_record;
-        u8 *data = fsrv->persistent_record_data[entry];
-        u32 len = fsrv->persistent_record_len[entry];
-        if (likely(len && data)) {
-
-          snprintf(fn, sizeof(fn), "%s/RECORD:%06u,cnt:%06u",
-                   fsrv->persistent_record_dir, fsrv->persistent_record_cnt,
-                   writecnt++);
-          int fd = open(fn, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-          if (fd >= 0) {
-
-            ck_write(fd, data, len, fn);
-            close(fd);
-
-          }
-
-        }
-
+      s32 tmp_pid = fsrv->child_pid;
+      if (tmp_pid > 0) {
+        kill(tmp_pid, fsrv->child_kill_signal);
+        fsrv->child_pid = -1;
       }
 
-      ++fsrv->persistent_record_cnt;
-
+      fsrv->last_run_timed_out = 1;
+      if (read(fsrv->fsrv_st_fd, &fsrv->child_status, 4) < 4) { exec_ms = 0; }
     }
+
+    if (!exec_ms) {
+      if (*stop_soon_p) { return 0; }
+      SAYF("\n" cLRD "[-] " cRST
+           "Unable to communicate with fork server. Some possible reasons:\n\n"
+           "    - You've run out of memory. Use -m to increase the the memory "
+           "limit\n"
+           "      to something higher than %llu.\n"
+           "    - The binary or one of the libraries it uses manages to "
+           "create\n"
+           "      threads before the forkserver initializes.\n"
+           "    - The binary, at least in some circumstances, exits in a way "
+           "that\n"
+           "      also kills the parent process - raise() could be the "
+           "culprit.\n"
+           "    - If using persistent mode with QEMU, "
+           "AFL_QEMU_PERSISTENT_ADDR "
+           "is\n"
+           "      probably not valid (hint: add the base address in case of "
+           "PIE)"
+           "\n\n"
+           "If all else fails you can disable the fork server via "
+           "AFL_NO_FORKSRV=1.\n",
+           fsrv->mem_limit);
+      RPFATAL(res, "Unable to communicate with fork server");
+    }
+
+    if (!WIFSTOPPED(fsrv->child_status)) { fsrv->child_pid = -1; }
+
+    fsrv->total_execs++;
+
+    /* Any subsequent operations on fsrv->trace_bits must not be moved by the
+       compiler below this point. Past this location, fsrv->trace_bits[]
+       behave very normally and do not have to be treated as volatile. */
+
+    MEM_BARRIER();
+
+    /* Report outcome to caller. */
+
+    /* Was the run unsuccessful? */
+    if (unlikely(*(u32 *)fsrv->trace_bits == EXEC_FAIL_SIG)) {
+      return FSRV_RUN_ERROR;
+    }
+
+    /* Did we timeout? */
+    if (unlikely(fsrv->last_run_timed_out)) {
+      fsrv->last_kill_signal = fsrv->child_kill_signal;
+      return FSRV_RUN_TMOUT;
+    }
+
+    /* Did we crash?
+    In a normal case, (abort) WIFSIGNALED(child_status) will be set.
+    MSAN in uses_asan mode uses a special exit code as it doesn't support
+    abort_on_error. On top, a user may specify a custom AFL_CRASH_EXITCODE.
+    Handle all three cases here. */
+
+    if (unlikely(
+            /* A normal crash/abort */
+            (WIFSIGNALED(fsrv->child_status)) ||
+            /* special handling for msan and lsan */
+            (fsrv->uses_asan &&
+             (WEXITSTATUS(fsrv->child_status) == MSAN_ERROR ||
+              WEXITSTATUS(fsrv->child_status) == LSAN_ERROR)) ||
+            /* the custom crash_exitcode was returned by the target */
+            (fsrv->uses_crash_exitcode &&
+             WEXITSTATUS(fsrv->child_status) == fsrv->crash_exitcode))) {
+#ifdef AFL_PERSISTENT_RECORD
+      if (unlikely(fsrv->persistent_record)) {
+        char fn[PATH_MAX];
+        u32  i, writecnt = 0;
+        for (i = 0; i < fsrv->persistent_record; ++i) {
+          u32 entry =
+              (i + fsrv->persistent_record_idx) % fsrv->persistent_record;
+          u8 *data = fsrv->persistent_record_data[entry];
+          u32 len = fsrv->persistent_record_len[entry];
+          if (likely(len && data)) {
+            snprintf(fn, sizeof(fn), "%s/RECORD:%06u,cnt:%06u",
+                     fsrv->persistent_record_dir, fsrv->persistent_record_cnt,
+                     writecnt++);
+            int fd = open(fn, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+            if (fd >= 0) {
+              ck_write(fd, data, len, fn);
+              close(fd);
+            }
+          }
+        }
+
+        ++fsrv->persistent_record_cnt;
+      }
 
 #endif
 
-    /* For a proper crash, set last_kill_signal to WTERMSIG, else set it to 0 */
-    fsrv->last_kill_signal =
-        WIFSIGNALED(fsrv->child_status) ? WTERMSIG(fsrv->child_status) : 0;
-    return FSRV_RUN_CRASH;
+      /* For a proper crash, set last_kill_signal to WTERMSIG, else set it to 0
+       */
+      fsrv->last_kill_signal =
+          WIFSIGNALED(fsrv->child_status) ? WTERMSIG(fsrv->child_status) : 0;
+      return FSRV_RUN_CRASH;
+    }
+  } 
+  else  // nethook logic
+  {
+    fsrv_run_result_t finalres = FSRV_RUN_OK;
+
+    u32 command = NETHOOK_CMD_SEED_READY;
+    u8  is_new_conn = 0;
+    if (fsrv->need_new_conn || fsrv->no_connection_reuse)
+    { 
+      command = NETHOOK_CMD_SEED_READY_NEWCON;
+      is_new_conn = 1;
+      fsrv->need_new_conn = 0;
+      fsrv->keep_timeout_times = 0;
+      //printf("send newcon command once\n");
+    }
+
+    //ACTF("Fuzz write len: %u\n\n", *(unsigned int*)fsrv->shmem_fuzz_len);
+
+    if ((res = write(fsrv->hook_ctl_fd, &command, 4)) != 4) {
+      if (*stop_soon_p) { return 0; }
+      RPFATAL(res, "Unable to tell server seed ready");
+    }
+
+    // LOG("Send command %d\n", command);
+
+    u32 result = 0;
+    u32 used_timeout =
+        timeout + (is_new_start ? fsrv->new_start_tmout : 0) +
+        (is_new_conn ? fsrv->new_conn_tmout : 0) +
+        fsrv->new_conn_tmout;  // 增加一次fsrv->new_conn_tmout因为可能hook端发现close会自动重连
+
+    exec_ms =
+        read_s32_timed(fsrv->hook_st_fd, &result, used_timeout, stop_soon_p);
+
+    u8 need_kill = 0;
+
+    /* xzw add no conn reuse means kill the PUT after every exec */
+    if (fsrv->forced_kill) {
+        need_kill = 1;
+        fsrv->total_execs++;
+        return finalres ;
+    }
+
+    if (fsrv->no_connection_reuse) { 
+        fsrv->need_new_conn = 1; 
+        fsrv->total_execs++;
+        return finalres;
+    }
+
+    u8 is_simple_timeout = (result == NETHOOK_CMD_TIME_OUT);
+
+    if (exec_ms > timeout && !need_kill) 
+    {
+      // 如果超时，有几种可能，如子进程已经退出，或者处理此次种子确实太慢
+
+      if (!exist_pid(fsrv->child_pid)) 
+      {     // 如果是因为子进程退出，则需要把fsrv_st_fd上的返回值读走
+
+        if (read(fsrv->fsrv_st_fd, &fsrv->child_status, 4) < 4) { exec_ms = 0; }
+        fsrv->child_pid = -1;
+        finalres = FSRV_RUN_CRASH;
+      } 
+      else  // 如果子进程还在、只是超时，则进行一些记录
+      {  
+         is_simple_timeout = 1;
+      }
+    }
+
+    if (is_simple_timeout && !need_kill) {
+      fsrv->keep_timeout_times++;
+      LOG("fsrv->keep_timeout_times=%d, fsrv->keep_badconn_times=%d\n",
+          fsrv->keep_timeout_times, fsrv->keep_badconn_times);
+      if (fsrv->keep_timeout_times > fsrv->timeout_times_threh) {
+        // 本连接处理input超时过多，则需要重连
+         if (fsrv->no_multi_connection) {
+             need_kill=1;
+         } else {
+             fsrv->need_new_conn = 1;
+             fsrv->keep_badconn_times++;
+             if (fsrv->keep_badconn_times >
+                 fsrv->badconn_times_threh) {  // 持续每个连接都超时，则需要重新启动子进程
+            need_kill = 1;
+             }
+         }
+        }
+       
+    finalres = FSRV_RUN_TMOUT;
+    }
+
+
+    // emwa logic
+    if (fsrv->ewma_enabled) {
+    if (!previous_trace_bits) {
+         previous_trace_bits = (u8 *)ck_alloc(fsrv->map_size);
+
+         ewma_avg = count_diff_bits(fsrv, previous_trace_bits);
+
+         memcpy(previous_trace_bits, fsrv->trace_bits, fsrv->map_size);
+
+    } else {
+         u32 diff_bits_count = count_diff_bits(fsrv, previous_trace_bits);
+
+         memcpy(previous_trace_bits, fsrv->trace_bits, fsrv->map_size);
+
+         ewma_avg = ewma(ewma_avg, diff_bits_count, 0.1);
+
+         if (fsrv->debug) printf("ewma_avg=%u\n", ewma_avg);
+
+         if (fsrv->need_new_conn || need_kill) {
+             // 如果上层已经处理给ewma奖励
+             ewma_avg = 5;
+         } else if (ewma_avg == 0) {
+             // 先尝试断开连接
+             if (!fsrv->need_new_conn && !fsrv->no_multi_connection) {
+            fsrv->need_new_conn = 1;
+            ewma_avg = 5;
+             } else {  // 杀进程
+            need_kill = 1;
+            ewma_avg = 5;
+             }
+         }
+    }
+    }
+    if (*stop_soon_p) { return 0;  }
+
+    if (!exec_ms &&!is_simple_timeout &&!need_kill ) {
+      RPFATAL(res, "Unable to communicate with fork server (nethook)");
+    }
+
+    if (exec_ms <= timeout || need_kill) 
+    {  // 正常情况
+      fsrv->keep_timeout_times = 0;
+      fsrv->keep_badconn_times = 0;
+    }
+
+    fsrv->total_execs++;
+
+    MEM_BARRIER();
+
+
+    /* Was the run unsuccessful? */
+    if (unlikely(*(u32 *)fsrv->trace_bits == EXEC_FAIL_SIG)) {
+        finalres = FSRV_RUN_ERROR;
+    }
+
+
+    // 如果需要kill，执行
+    if (need_kill) 
+    {
+
+        LOG("kill once\n");
+        fsrv->need_new_conn = 1;
+        s32 tmp_pid = fsrv->child_pid;
+        if (tmp_pid > 0) {
+         
+        kill(tmp_pid, fsrv->child_kill_signal);
+        fsrv->child_pid = -1;
+
+        }
+
+        fsrv->last_run_timed_out = 1;
+        if (read(fsrv->fsrv_st_fd, &fsrv->child_status, 4) < 4) { exec_ms = 0; }
+    }
+
+    return finalres;
 
   }
 
@@ -1873,3 +2191,79 @@ void afl_fsrv_deinit(afl_forkserver_t *fsrv) {
 
 }
 
+/*xzw add for emwa, We use the XOR result of current trace and previous trace
+as the input value of EWMA to determine the status of the server ,if the XOR
+results keeps low the status of the server is abnormal
+*/
+
+/* Destructively simplify trace by eliminating hit count information
+   and replacing it with 0x80 or 0x01 depending on whether the tuple
+   is hit or not. Called on every new crash or timeout, should be
+   reasonably fast. ftom afl-fuzz-bitmap.c */
+const u8 simplify_lookup1[256] = {
+
+    [0] = 1, [1 ... 255] = 128
+
+};
+
+u32 my_count_non_255_bytes(afl_forkserver_t *fsrv) {
+  u32 *ptr = (u64 *)fsrv->trace_bits;
+  u32  i = ((fsrv->real_map_size + 3) >> 2);
+  u32  ret = 0;
+
+  while (i--) {
+    u32 v = *(ptr++);
+
+    /* This is called on the virgin bitmap, so optimize for the most likely
+       case. */
+
+    if (likely(v == 0xffffffffU)) { continue; }
+    if ((v & 0x000000ffU) != 0x000000ffU) { ++ret; }
+    if ((v & 0x0000ff00U) != 0x0000ff00U) { ++ret; }
+    if ((v & 0x00ff0000U) != 0x00ff0000U) { ++ret; }
+    if ((v & 0xff000000U) != 0xff000000U) { ++ret; }
+  }
+
+  return ret;
+}
+
+inline u32 count_diff_bits(afl_forkserver_t *fsrv, u8 *previous_map) {
+#ifdef WORD_SIZE_64
+
+  u64 *current = (u64 *)fsrv->trace_bits;
+  u64 *previous = (u64 *)previous_map;
+
+  u32 i = ((fsrv->real_map_size + 7) >> 3);  // map_size / 8 for 64-bit
+
+#else
+
+  u32 *current = (u32 *)fsrv->trace_bits;
+  u32 *previous = (u32 *)previous_map;
+
+  u32 i = ((fsrv->real_map_size + 3) >> 2);  // map_size / 4 for 32-bit
+
+#endif /* ^WORD_SIZE_64 */
+
+  u32 different_bits_count = 0;
+
+   while (i--) {
+    u64 cur_word = *(current++);
+    u64 prev_word = *(previous++);
+
+    // Process each byte within the word and compare after simplification
+    for (u32 j = 0; j < sizeof(u64); j++) {
+        u8 cur_byte = (cur_word >> (j * 8)) & 0xFF;
+        u8 prev_byte = (prev_word >> (j * 8)) & 0xFF;
+
+        u8 simplified_current = simplify_lookup1[cur_byte];
+        u8 simplified_previous = simplify_lookup1[prev_byte];
+
+        u8 xor_result = simplified_current ^ simplified_previous;
+
+        // if there is a difference
+        if (xor_result) { different_bits_count++; }
+    }
+  }
+
+  return different_bits_count;
+}

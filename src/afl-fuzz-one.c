@@ -1871,6 +1871,12 @@ custom_mutator_stage:
    * CUSTOM MUTATORS *
    *******************/
 
+    /* we will not perform  focus mode while queued_items < 4 */
+  if (likely(afl->focus_mode &&
+             (afl->queued_items - afl->queued_focused > 4))) {
+    goto focus_stage;
+  }
+
   if (likely(!afl->custom_mutators_count)) { goto havoc_stage; }
 
   afl->stage_name = "custom mutator";
@@ -3303,7 +3309,12 @@ havoc_stage:
 
     }
 
-    if (common_fuzz_stuff(afl, out_buf, temp_len)) { goto abandon_entry; }
+      /* Havoc run */
+    // focuse_stage(afl, out_buf, temp_len);
+    if (common_fuzz_stuff(afl, out_buf, temp_len)) {
+      /* Give focus a try */
+      if (focuse_stage(afl, out_buf, temp_len)) { goto abandon_entry; }
+    }
 
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
@@ -3459,6 +3470,252 @@ abandon_entry:
 
 #undef FLIP_BIT
 
+  /* xzw add for focus mdoe (experimental) */
+  /****************
+   * FOCUS MODE *
+   ****************/
+
+focus_stage:
+
+  // show_stats(afl);
+  // ACTF("run at focus stage");
+
+  /* focus 3 stage random choose 3 entry as prefix */
+
+  afl->stage_name = "focus 3";
+  afl->stage_short = "focus";
+  afl->stage_cur = 0;
+  afl->stage_val_type = STAGE_VAL_NONE;
+
+  /* We just need five iterations for six permutations */
+  afl->stage_max = FOCUS_THREE_ITEMS;
+
+  /* New length of out_buf */
+  size_t new_len = 0;
+
+  struct queue_entry *target_items[3] = {NULL};
+  struct queue_entry *cur_q = afl->queue_buf[afl->current_entry];
+  u8                 *cur_buf = queue_testcase_get(afl, cur_q);
+
+  u32 target_len[3];
+  u8 *target_buf[3];
+
+  u32 tid;
+//u8 target_num = 0;
+
+  /* Get 3 random entry information and make them as prefix */
+  for (int i = 0; i < 3; i++) {
+    do {
+      tid = rand_below(afl, afl->queued_items);
+    } while (unlikely(tid == afl->current_entry ||
+                      afl->queue_buf[tid]->focusing ||
+                      afl->queue_buf[tid]->disabled));
+
+    target_items[i] = afl->queue_buf[tid];
+    target_buf[i] = queue_testcase_get(afl, target_items[i]);
+    target_len[i] = target_items[i]->len;
+
+    /* mark the entry that have been focusd, don't meaninglessly repeat */
+    target_items[i]->focusing = 1;
+
+    new_len += target_len[i];
+  }
+
+  /* Clean mark */
+  for (u8 i = 0; i < 3; i++) {
+    target_items[i]->focusing = 0;
+  }
+
+  u32 proposed_len = new_len + cur_q->len;
+  new_len = proposed_len > MAX_FILE ? MAX_FILE : proposed_len;
+
+  out_buf = afl_realloc(AFL_BUF_PARAM(out), new_len);
+  if (unlikely(!out_buf)) { PFATAL("alloc"); }
+
+  /* Perform focus fuzz, we will try all permutations */
+  for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
+    u32 offset = 0;
+
+    for (u8 j = 0; j < 3; j++) {
+      u8 perm_index = perms_three[afl->stage_cur][j];
+      // ACTF("offset=%u", offset);
+
+      if (unlikely(offset + target_len[perm_index] > new_len)) {
+        // ACTF("bad length: offset + target_len[%u] = %u + %u exceeds new_len
+        // %u",
+        //      perm_index, offset, target_len[perm_index], new_len);
+        goto abandon_entry;
+      }
+
+      /* We will run common_fuzz_stuff() while j==1, which equals *
+       * to focus 2 (choose 2 random entry as prefix)             */
+      if (j == 1 && unlikely(offset + cur_q->len > new_len)) {
+        /* this stage is pretty short and don't change stage_cur so
+         * you can't see it at show_stats()                       */
+        afl->stage_name = "focus 2";
+
+        memcpy(out_buf + offset, cur_buf, cur_q->len);
+
+        if (common_fuzz_stuff(afl, out_buf, offset + cur_q->len)) {
+          goto abandon_entry;
+        }
+      }
+
+      memcpy(out_buf + offset, target_buf[perm_index], target_len[perm_index]);
+
+      offset += target_len[perm_index];
+    }
+
+    if (unlikely(offset + cur_q->len > new_len)) {
+      // ACTF("bad length: offset + target_len[%u] = %u + %u exceeds new_len
+      // %u",
+      //      perm_index, offset, target_len[perm_index], new_len);
+      goto abandon_entry;
+    }
+
+    memcpy(out_buf + offset, cur_buf, cur_q->len);
+
+    if (common_fuzz_stuff(afl, out_buf, new_len)) { goto abandon_entry; }
+  }
+
+  goto havoc_stage;
+  /* xzw add end */
+
+}
+
+/* The function for focus stage, this stage try to perform as: continuously fuzz
+ * in a  * certain state. So we will add some random entry at the head of
+ * out_buf as prefix    */
+inline u8 __attribute__((hot))
+focuse_stage(afl_state_t *afl, u8 *in_buf, u32 len) {
+  // ACTF("at focus");
+
+  /* We will perform some destructive assignment,which will affect  *
+   * original method, so we will keep some variables at first       */
+  /* Store */
+  u8 *tmp_stage_name = afl->stage_name;
+  u8 *tmp_stage_short = afl->stage_short;
+  u32 tmp_stage_cur = afl->stage_cur;
+  u8  tmp_stage_val_type = afl->stage_val_type;
+  u32 tmp_stage_max = afl->stage_max;
+
+  u8 ret_val = 0;
+
+  if (unlikely(afl->queued_items < 4)) { goto abandon_entry; }
+
+  // ACTF("at focus");
+
+  afl->stage_name = "focus 3";
+  afl->stage_short = "focus";
+  afl->stage_cur = 0;
+  afl->stage_val_type = STAGE_VAL_NONE;
+
+  /* We just need five iterations for six permutations */
+  afl->stage_max = FOCUS_THREE_ITEMS;
+
+  show_stats(afl);
+
+  /* New length of out_buf */
+  size_t new_len = 0;
+
+  struct queue_entry *target_items[3] = {NULL};
+
+  u32 target_len[3];
+  u8 *target_buf[3];
+  u8 *out_buf;
+  u32 tid;
+  //u8  target_num = 0;
+
+  /* Get 3 random entry information and make them as prefix */
+  for (int i = 0; i < 3; i++) {
+    do {
+      tid = rand_below(afl, afl->queued_items);
+    } while (unlikely(tid == afl->current_entry ||
+                      afl->queue_buf[tid]->focusing ||
+                      afl->queue_buf[tid]->disabled));
+
+    target_items[i] = afl->queue_buf[tid];
+    target_buf[i] = queue_testcase_get(afl, target_items[i]);
+    target_len[i] = target_items[i]->len;
+
+    /* mark the entry that have been focusd, don't meaninglessly repeat */
+    target_items[i]->focusing = 1;
+
+    new_len += target_len[i];
+  }
+
+  /* Clean mark */
+  for (u8 i = 0; i < 3; i++) {
+    target_items[i]->focusing = 0;
+  }
+
+  u32 proposed_len = new_len + len;
+  new_len = proposed_len > MAX_FILE ? MAX_FILE : proposed_len;
+
+  out_buf = afl_realloc(AFL_BUF_PARAM(out), new_len);
+  if (unlikely(!out_buf)) { PFATAL("alloc"); }
+
+  /* Perform focus fuzz, we will try all permutations */
+  for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
+    u32 offset = 0;
+
+    for (u8 j = 0; j < 3; j++) {
+      u8 perm_index = perms_three[afl->stage_cur][j];
+      // ACTF("offset=%u", offset);
+
+      if (unlikely(offset + target_len[perm_index] > new_len)) {
+        // ACTF("bad length: offset + target_len[%u] = %u + %u exceeds new_len
+        // %u",
+        //      perm_index, offset, target_len[perm_index], new_len);
+        goto abandon_entry;
+      }
+
+      /* We will run common_fuzz_stuff() while j==1, which equals *
+       * to focus 2 (choose 2 random entry as prefix)             */
+      if (j == 1 && unlikely(offset + len > new_len)) {
+        /* this stage is pretty short and don't change stage_cur so
+         * you can't see it at show_stats()                       */
+        afl->stage_name = "focus 2";
+
+        memcpy(out_buf + offset, in_buf, len);
+        // ACTF("focus 2");
+        if ((ret_val = common_fuzz_stuff(afl, out_buf, offset + len))) {
+          goto abandon_entry;
+        }
+      }
+
+      memcpy(out_buf + offset, target_buf[perm_index], target_len[perm_index]);
+
+      offset += target_len[perm_index];
+    }
+
+    if (unlikely(offset + len > new_len)) {
+      // ACTF("bad length: offset + target_len[%u] = %u + %u exceeds new_len
+      // %u",
+      //      perm_index, offset, target_len[perm_index], new_len);
+      goto abandon_entry;
+    }
+
+    memcpy(out_buf + offset, in_buf, len);
+
+    afl->stage_name = "focus 3";
+    // ACTF("focus 3");
+    if ((ret_val = common_fuzz_stuff(afl, out_buf, new_len))) {
+      goto abandon_entry;
+    }
+  }
+
+  /* To maintain consistency in function exports, return 0 as goto abandon_entry
+   */
+abandon_entry:
+  /* we will resume original vriables */
+  afl->stage_name = tmp_stage_name;
+  afl->stage_short = tmp_stage_short;
+  afl->stage_cur = tmp_stage_cur;
+  afl->stage_val_type = tmp_stage_val_type;
+  afl->stage_max = tmp_stage_max;
+
+  return ret_val;
 }
 
 /* MOpt mode */
@@ -6227,3 +6484,29 @@ u8 fuzz_one(afl_state_t *afl) {
 
 }
 
+/* Send pre-packet */
+
+u8 send_pre_packet(afl_state_t *afl) {
+  //ACTF("Send pre-packets");
+
+  u8 sig = 0;
+
+  u8 *pre_buf;
+
+  for (u32 i = 0; i < afl->queued_pre; i++) {
+    afl->pre_queue_cur = afl->pre_queue_buf[i];
+
+    pre_buf = queue_testcase_get(afl, afl->pre_queue_cur);
+
+    /* Send pre-packet respectively */
+
+    sig = common_fuzz_stuff(afl, pre_buf, afl->pre_queue_cur->len);
+  }
+
+  /* Some clean works */
+  pre_buf = NULL;
+
+  afl->fsrv.need_new_conn = 0;
+
+  return sig; /* 0 for success, 1 for error */
+}

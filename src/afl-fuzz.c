@@ -536,12 +536,20 @@ int main(int argc, char **argv_orig, char **envp) {
 
   afl->shmem_testcase_mode = 1;  // we always try to perform shmem fuzzing
 
-  // still available: HjJkKqruvwz
+  // still available: jJkKqruvwz
   while ((opt = getopt(argc, argv,
-                       "+a:Ab:B:c:CdDe:E:f:F:g:G:hi:I:l:L:m:M:nNo:Op:P:QRs:S:t:"
-                       "T:UV:WXx:YZ")) > 0) {
+                       "+a:Ab:B:c:CdDe:E:f:F:g:G:H:hi:I:l:L:m:M:nNo:Op:P:QRs:S:t:"
+                       "T:uUV:WXx:YZ")) > 0) {
 
     switch (opt) {
+
+      // for nethook
+      case 'H':
+        afl->use_net = 1;
+        if (sscanf(optarg, "%hhu:%u", &afl->net_protocol, &afl->net_port) != 2) {
+          FATAL("Bad syntax used for -H");
+        }
+        break;
 
       case 'a':
 
@@ -1090,6 +1098,18 @@ int main(int argc, char **argv_orig, char **envp) {
 
         if (afl->no_unlink) { FATAL("Multiple -N options not supported"); }
         afl->fsrv.no_unlink = (afl->no_unlink = true);
+
+        break;
+
+       case 'u': /* Focus mode */
+       /* xzw: FOCUS MODE is developed to find new path when each packet is split */
+
+        if (afl->focus_mode) { FATAL("Multiple -u options not supported"); }
+        afl->focus_mode = 1;
+
+        WARNF(
+            "Note that the focus mode is enabled, you need the split "
+            "package as the original seed.");
 
         break;
 
@@ -1784,6 +1804,22 @@ int main(int argc, char **argv_orig, char **envp) {
   check_cpu_governor(afl);
   #endif
 
+
+  // Add for nethook 
+  // Transmit the protocol used and port used to the hook side
+  if (afl->use_net) { 
+
+      u8 *proto = alloc_printf("%d", afl->net_protocol);
+      setenv("NETHOOK_PROTOCOL", proto, 1);
+      ck_free(proto);
+
+      u8 *port = alloc_printf("%d", afl->net_port);
+      setenv("NETHOOK_PORT", port, 1);
+      ck_free(port);
+
+      afl->fsrv.use_net = afl->use_net;
+  }
+
   if (getenv("LD_PRELOAD")) {
 
     WARNF(
@@ -1867,6 +1903,30 @@ int main(int argc, char **argv_orig, char **envp) {
 
     FATAL("Bad value of AFL_TARGET_ENV");
 
+  }
+
+  /* xzw add */
+  if (afl->afl_env.afl_no_connection_reuse) {
+      afl->fsrv.no_connection_reuse=1;
+  }
+
+  if (afl->afl_env.afl_forced_kill) {
+      afl->fsrv.forced_kill = 1;
+  }
+
+   if (afl->afl_env.afl_no_multi_connection) { 
+       afl->fsrv.no_multi_connection = 1;
+  }
+   if (afl->afl_env.ewma_mode) {
+       afl->fsrv.ewma_enabled = 1;
+   }
+
+  if (afl->afl_env.afl_exp_signal) {
+      afl->fsrv.exp_signal = afl->afl_env.afl_exp_signal;
+  }
+
+  if (afl->afl_env.afl_exp_t_interval) { 
+      afl->fsrv.exp_t_interval = afl->afl_env.afl_exp_t_interval;
   }
 
   save_cmdline(afl, argc, argv);

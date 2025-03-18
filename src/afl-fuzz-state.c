@@ -186,7 +186,57 @@ void read_afl_environment(afl_state_t *afl, char **envp) {
             afl->afl_env.afl_skip_cpufreq =
                 get_afl_env(afl_environment_variables[i]) ? 1 : 0;
 
-          } else if (!strncmp(env, "AFL_EXIT_WHEN_DONE",
+          } /* xzw add */ 
+          else if (!strncmp(env, "AFL_NO_CONNECTION_REUSE",
+
+                              afl_environment_variable_len)) {
+            afl->afl_env.afl_no_connection_reuse =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } 
+           else if (!strncmp(env, "AFL_FORCED_KILL",
+
+                              afl_environment_variable_len)) {
+            afl->afl_env.afl_forced_kill =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } 
+           else if (!strncmp(env, "AFL_EWMA_ENABLED",
+
+                              afl_environment_variable_len)) {
+            afl->afl_env.ewma_mode =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } 
+          else if (!strncmp(env, "AFL_NO_MULTI_CONNECTION",
+
+                              afl_environment_variable_len)) {
+            afl->afl_env.afl_no_multi_connection =
+                get_afl_env(afl_environment_variables[i]) ? 1 : 0;
+
+          } 
+          else if (!strncmp(env, "AFL_EXP_SIGNAL",
+                              afl_environment_variable_len)) {
+            const char *value = get_afl_env(afl_environment_variables[i]);
+            if (value) {
+              int int_value = atoi(value);
+              if (int_value == 1 || int_value == 2) {
+                afl->afl_env.afl_exp_signal = (u8)int_value;
+              } else {
+                afl->afl_env.afl_exp_signal = 0;
+              }
+            } else {
+              afl->afl_env.afl_exp_signal = 0;
+            }
+          }
+           else if (!strncmp(env, "AFL_EXP_T_INTERVAL",
+
+                              afl_environment_variable_len)) {
+            afl->afl_env.afl_exp_t_interval =
+                strtoull(get_afl_env(afl_environment_variables[i]), NULL, 0);
+
+          } 
+          else if (!strncmp(env, "AFL_EXIT_WHEN_DONE",
 
                               afl_environment_variable_len)) {
 

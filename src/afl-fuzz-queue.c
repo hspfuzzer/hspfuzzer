@@ -597,6 +597,17 @@ void add_to_queue(afl_state_t *afl, u8 *fname, u32 len, u8 passed_det) {
   q->testcase_buf = NULL;
   q->mother = afl->queue_cur;
 
+   /* xzw: We need some special method for interesting stuff from focused stage,
+   * we don't want to focus  a seed that had been focused, it may cause verbose
+   * and repetitive seed as trim is disabled   */
+
+  if (afl->stage_short != NULL) {
+    if (strcmp(afl->stage_short, "focus") == 0) {
+      afl->queued_focused++;
+      q->focused = 1;
+    }
+  }
+
 #ifdef INTROSPECTION
   q->bitsmap_size = afl->bitsmap_size;
 #endif
@@ -613,13 +624,33 @@ void add_to_queue(afl_state_t *afl, u8 *fname, u32 len, u8 passed_det) {
 
   }
 
-  if (likely(q->len > 4)) { ++afl->ready_for_splicing_count; }
+ /* We should deal with pre-packet, disbale it to keep it away from mutate */
 
-  ++afl->queued_items;
-  ++afl->active_items;
-  ++afl->pending_not_fuzzed;
+  if (strstr(q->fname, "pre")) {
+
+    ACTF("add pre-packet %s", q->fname);
+
+    q->is_pre_packet = 1;
+    q->disabled = 1;
+
+    ++afl->queued_pre;
+
+    struct queue_entry **pre_queue_buf = (struct queue_entry **)afl_realloc(
+        AFL_BUF_PARAM(pre_queue),
+        afl->queued_pre * sizeof(struct queue_entry *));
+    if (unlikely(!pre_queue_buf)) { PFATAL("alloc"); }
+    pre_queue_buf[afl->queued_pre - 1] = q;
+  } else {
+    if (likely(q->len > 4)) { ++afl->ready_for_splicing_count; }
+
+    ++afl->active_items;
+    ++afl->pending_not_fuzzed;
+  }
+
 
   afl->cycles_wo_finds = 0;
+
+  ++afl->queued_items;
 
   struct queue_entry **queue_buf = (struct queue_entry **)afl_realloc(
       AFL_BUF_PARAM(queue), afl->queued_items * sizeof(struct queue_entry *));

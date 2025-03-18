@@ -93,6 +93,7 @@ fuzz_run_target(afl_state_t *afl, afl_forkserver_t *fsrv, u32 timeout) {
 u32 __attribute__((hot))
 write_to_testcase(afl_state_t *afl, void **mem, u32 len, u32 fix) {
 
+
   u8 sent = 0;
 
   if (unlikely(afl->custom_mutators_count)) {
@@ -175,6 +176,7 @@ write_to_testcase(afl_state_t *afl, void **mem, u32 len, u32 fix) {
 
         if (el->afl_custom_fuzz_send) {
 
+
           el->afl_custom_fuzz_send(el->data, *mem, new_size);
           sent = 1;
 
@@ -184,9 +186,11 @@ write_to_testcase(afl_state_t *afl, void **mem, u32 len, u32 fix) {
 
     }
 
+          
     if (likely(!sent)) {
 
-      /* everything as planned. use the potentially new data. */
+              
+     /* everything as planned. use the potentially new data. */
       afl_fsrv_write_to_testcase(&afl->fsrv, *mem, new_size);
 
       if (likely(!afl->afl_env.afl_post_process_keep_original)) {
@@ -464,6 +468,8 @@ u8 calibrate_case(afl_state_t *afl, struct queue_entry *q, u8 *use_mem,
 
     afl_fsrv_start(&afl->fsrv, afl->argv, &afl->stop_soon,
                    afl->afl_env.afl_debug_child);
+
+
 
     if (afl->fsrv.support_shmem_fuzz && !afl->fsrv.use_shmem_fuzz) {
 
@@ -1071,11 +1077,35 @@ abort_trimming:
 /* Write a modified test case, run program, process results. Handle
    error conditions, returning 1 if it's time to bail out. This is
    a helper function for fuzz_one(). */
-
+u8 pre_had_been_send = 0;
 u8 __attribute__((hot))
 common_fuzz_stuff(afl_state_t *afl, u8 *out_buf, u32 len) {
 
   u8 fault;
+   /*  Send pre - packet first */
+  if (afl->fsrv.need_new_conn || !pre_had_been_send) {
+    pre_had_been_send = 1;
+
+    //u8 sig = 0;
+
+    u8 *pre_buf;
+    //printf("afl->queued_items:%u", afl->queued_items);
+    for (u32 i = 0; i < afl->queued_pre; i++) {
+      //ACTF("Send pre-packets_%d",i);
+      afl->pre_queue_cur = afl->pre_queue_buf[i];
+
+      pre_buf = queue_testcase_get(afl, afl->pre_queue_cur);
+
+      write_to_testcase(afl, (void **)&pre_buf, afl->pre_queue_cur->len, 0);
+
+      //printf("%s\n", pre_buf);
+
+      fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
+    }
+    pre_buf = NULL;
+
+  }
+
 
   if (unlikely(len = write_to_testcase(afl, (void **)&out_buf, len, 0)) == 0) {
 
@@ -1083,7 +1113,19 @@ common_fuzz_stuff(afl_state_t *afl, u8 *out_buf, u32 len) {
 
   }
 
+ // afl->fsrv.need_new_conn = 1;
+
   fault = fuzz_run_target(afl, &afl->fsrv, afl->fsrv.exec_tmout);
+
+  /*
+
+  if (afl->fsrv.total_execs >= 10000) {
+      ACTF("实验统计结果：新元组 = %llu, 命中变化次数 = %llu",
+       afl->total_new_tuples, afl->total_hits_changed);
+
+      afl->stop_soon = 1;
+  }
+  */
 
   if (afl->stop_soon) { return 1; }
 

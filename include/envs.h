@@ -176,6 +176,12 @@ static char *afl_environment_variables[] = {
     "AFL_NO_ARITH",
     "AFL_NO_AUTODICT",
     "AFL_NO_BUILTIN",
+    /* xzw add */
+    "AFL_EWMA_ENABLED",
+    "AFL_EXP_T_INTERVAL",
+    "AFL_EXP_SIGNAL",
+    "AFL_NO_CONNECTION_REUSE",
+    "AFL_NO_MULTI_CONNECTION",
 #if defined USE_COLOR && !defined ALWAYS_COLORED
     "AFL_NO_COLOR",
     "AFL_NO_COLOUR",

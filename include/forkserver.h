@@ -112,7 +112,19 @@ typedef struct afl_forkserver {
 
       dev_null_fd,                      /* Persistent fd for /dev/null      */
       fsrv_ctl_fd,                      /* Fork server control pipe (write) */
-      fsrv_st_fd;                       /* Fork server status pipe (read)   */
+      fsrv_st_fd,                       /* Fork server status pipe (read)   */
+      // nethook
+      hook_ctl_fd,                      /* Hook control pipe (write)*/
+      hook_st_fd;                       /* Hook status pipe (read)*/
+
+  bool use_net;                         /* For enable nethook */
+  u32 new_start_tmout;                  /* Configurable newly start server timeout (ms) */
+  u32 new_conn_tmout;                   /* Configurable newly start connection timeout (ms) */
+  u32 keep_timeout_times;               /* 当前连接的连续超时次数 */
+  u32 keep_badconn_times;               /* 当前程序的连续重连次数 */
+  u32 timeout_times_threh;              /* 连续超时次数门限，超过认为需要重连*/
+  u32 badconn_times_threh;              /* 连续连接出问题次数门限，超过认为需要重建子进程*/
+  bool need_new_conn;                   /* Need to tell server to reconnect or not */
 
   u32 exec_tmout;                       /* Configurable exec timeout (ms)   */
   u32 init_tmout;                       /* Configurable init timeout (ms)   */
@@ -156,6 +168,19 @@ typedef struct afl_forkserver {
   bool debug;                           /* debug mode?                      */
 
   bool uses_crash_exitcode;             /* Custom crash exitcode specified? */
+
+  bool forced_kill;                     /* xzw: force kill the SUT after every exec */
+
+  bool no_connection_reuse;             /* xzw: we will try to re-establish connections */
+
+  bool no_multi_connection;             /* xzw: no multi connection request */
+
+  bool ewma_enabled;                    /* xzw: enable ewma?                */
+
+  u8 exp_signal;                        /* xzw: help to experimnts 1->SIGUSR1 2->SIGRTMIN */     
+
+  u64 exp_t_interval;                    /* xzw: interval to send signal */     
+
   u8   crash_exitcode;                  /* The crash exitcode specified     */
 
   u32 *shmem_fuzz_len;                  /* length of the fuzzing test case  */
@@ -216,12 +241,25 @@ typedef enum fsrv_run_result {
 
 } fsrv_run_result_t;
 
+typedef enum nethook_command {
+  /* 01 */ NETHOOK_CMD_SEED_READY = 1,     // Seed is ready
+  /* 02 */ NETHOOK_CMD_SEED_READY_NEWCON,  // Seed is ready && need new
+                                           // connection
+  /* 40 */ NETHOOK_CMD_CONSUMED =
+      40,                             // Hook side tells fuzz side data consumed
+  /* 41 */ NETHOOK_CMD_TIME_OUT = 41  // Hook side tells fuzz side timeout
+} nethook_command_t;
+
 void afl_fsrv_init(afl_forkserver_t *fsrv);
 void afl_fsrv_init_dup(afl_forkserver_t *fsrv_to, afl_forkserver_t *from);
 void afl_fsrv_start(afl_forkserver_t *fsrv, char **argv,
                     volatile u8 *stop_soon_p, u8 debug_child_output);
 u32  afl_fsrv_get_mapsize(afl_forkserver_t *fsrv, char **argv,
                           volatile u8 *stop_soon_p, u8 debug_child_output);
+// xzw add
+u32 count_diff_bits(afl_forkserver_t *fsrv, u8 *previous_map);
+u32  my_count_non_255_bytes(afl_forkserver_t *fsrv);
+
 void afl_fsrv_write_to_testcase(afl_forkserver_t *fsrv, u8 *buf, size_t len);
 fsrv_run_result_t afl_fsrv_run_target(afl_forkserver_t *fsrv, u32 timeout,
                                       volatile u8 *stop_soon_p);

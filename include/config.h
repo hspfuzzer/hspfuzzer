@@ -187,6 +187,11 @@
 #define POWER_BETA 1U
 #define MAX_FACTOR (POWER_BETA * 32)
 
+/* xzw add for focus mode */
+#define FOCUS_CYCLES 1024U
+/* three items have six combination (A66) */
+#define FOCUS_THREE_ITEMS 6U  
+
 /* Maximum stacking for havoc-stage tweaks. The actual value is calculated
    like this:
 

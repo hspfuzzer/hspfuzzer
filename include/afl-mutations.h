@@ -1743,6 +1743,26 @@ u32 mutation_strategy_exploitation_binary[MUT_STRATEGY_ARRAY_SIZE] = {
 
 };
 
+enum perms_index_three {
+  /* 00 */ PERM_012,
+  /* 01 */ PERM_021,
+  /* 02 */ PERM_102,
+  /* 03 */ PERM_120,
+  /* 04 */ PERM_201,
+  /* 05 */ PERM_210,
+
+  PERM_THREE_TOTAL
+};
+
+u8 perms_three[FOCUS_THREE_ITEMS][3] = {
+    {0, 1, 2},  // PERM_012
+    {0, 2, 1},  // PERM_021
+    {1, 0, 2},  // PERM_102
+    {1, 2, 0},  // PERM_120
+    {2, 0, 1},  // PERM_201
+    {2, 1, 0}   // PERM_210
+};
+
 u32 afl_mutate(afl_state_t *, u8 *, u32, u32, bool, bool, u8 *, u32, u32);
 u32 choose_block_len(afl_state_t *, u32);
 
