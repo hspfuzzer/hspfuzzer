@@ -533,7 +533,9 @@ void after_bind_called(int sockfd, const struct sockaddr *addr,
     /* TCP SOCK_STREAM  = 1 */
     /* UDP SOCK_DGRAM   = 2 */
 
-  if (is_target_server_addr(addr) && (sock_type-1)==net_protocol)
+  if (is_target_server_addr(addr) && ( (sock_type==PRO_TCP && sock_type == SOCK_STREAM)
+ 	        || (sock_type==PRO_UDP && sock_type == SOCK_DGRAM) ) ) 
+		      // check sock_type in a more portable manner since we later find in uClibc MIPS, SOCK_STREAM is defined as 2
   { 
      
     server_fd = sockfd;
