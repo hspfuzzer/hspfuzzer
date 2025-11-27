@@ -1,0 +1,80 @@
+FROM ubuntu:20.04
+
+# Install common dependencies
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get -y update && \
+    apt-get -y install sudo \ 
+    apt-utils \
+    build-essential \
+    openssl \
+    graphviz-dev \
+    git \
+    autoconf \
+    libgnutls28-dev \
+    libssl-dev \
+    python3-pip \
+    nano \
+    net-tools \
+    vim \
+    gdb \
+    netcat \
+    strace \
+    wget \
+# Add to support llvm/clang 12
+    gnupg \
+    software-properties-common \
+    lsb-release 
+
+# Add llvm source
+RUN wget https://apt.llvm.org/llvm.sh \
+    && chmod +x llvm.sh \
+    && ./llvm.sh 12 \
+    && rm llvm.sh
+
+# Install clang-12 llvm-12
+RUN apt-get update && apt-get -y install sudo \
+    clang-12 \
+    lld-12 \
+    clang-tools-12 \
+    llvm-12
+
+# Clang env
+RUN update-alternatives --install /usr/bin/clang clang /usr/bin/clang-12 100 \
+    && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-12 100
+
+# LLVM env
+ENV PATH="/usr/lib/llvm-12/bin:/usr/bin:${PATH}"
+
+# Check version 
+RUN clang --version && llvm-cov --version
+
+# Add a new user ubuntu, pass: ubuntu
+RUN groupadd ubuntu && \
+    useradd -rm -d /home/ubuntu -s /bin/bash -g ubuntu -G sudo -u 1000 ubuntu -p "$(openssl passwd -1 ubuntu)"
+
+RUN chmod 777 /tmp
+
+USER ubuntu
+WORKDIR /home/ubuntu
+
+
+ENV HSPFUZZ="/home/ubuntu/hspfuzzer"
+
+RUN git clone https://github.com/hspfuzzer/hspfuzzer.git && \
+    cd hspfuzzer &&\
+    clang -shared -fPIC shm_hook.c -o shm_hook.so -ldl -lpthread -g && \
+    make all 
+
+# Set up environment variables for hspfuzz
+ENV AFL_PATH=${HSPFUZZ}
+ENV PATH=${HSPFUZZ}:${PATH}
+
+USER root
+
+RUN ls ${WORKDIR} &&\
+    chmod +x ${HSPFUZZ}/afl-clang-fast &&\
+    chmod +x ${HSPFUZZ}/afl-clang-fast++ &&\
+    chmod +x ${HSPFUZZ}/afl-fuzz
+
+USER ubuntu
+
