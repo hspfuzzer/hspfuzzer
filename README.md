@@ -6,7 +6,7 @@ HSPFuzzer is developed based on [AFLplusplus](https://github.com/AFLplusplus/AFL
 
 ## BUILD
 
-#### Building and installing HSPFuzzer
+#### Building from source code
 
 llvm is needed for  AFLplusplus
 
@@ -31,6 +31,14 @@ CC=/path/to/afl-clang-fast CXX=/path/to/afl-clang-fast++
 ```
 
 when compiling fuzz target (`afl-clang/afl-gcc` will also work, but performs much worse)
+
+#### Building from docker
+
+```bash
+docker build -t hspfuzzer . -f Dockerfile-hspfuzzer
+```
+
+
 
 ## USAGE
 
